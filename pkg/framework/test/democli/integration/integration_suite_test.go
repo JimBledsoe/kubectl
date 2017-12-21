@@ -6,22 +6,18 @@ import (
 
 	"testing"
 
-	"os"
-
-	"path/filepath"
-
 	"github.com/onsi/gomega/gexec"
 	"k8s.io/kubectl/pkg/framework/test"
 )
 
 func TestIntegration(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Integration Suite")
+	RunSpecs(t, "DemoCLI Integration Suite")
 }
 
 var (
 	pathToDemoCommand string
-	fixtures          *test.Fixtures
+	controlPlane      *test.ControlPlane
 )
 
 var _ = BeforeSuite(func() {
@@ -29,14 +25,14 @@ var _ = BeforeSuite(func() {
 	pathToDemoCommand, err = gexec.Build("k8s.io/kubectl/pkg/framework/test/democli/")
 	Expect(err).NotTo(HaveOccurred())
 
-	assetsDir, ok := os.LookupEnv("KUBE_ASSETS_DIR")
-	Expect(ok).To(BeTrue(), "KUBE_ASSETS_DIR should point to a directory containing etcd and apiserver binaries")
-	fixtures = test.NewFixtures(filepath.Join(assetsDir, "etcd"), filepath.Join(assetsDir, "kube-apiserver"))
-	err = fixtures.Start()
+	controlPlane = test.NewControlPlane()
+	Expect(err).NotTo(HaveOccurred())
+
+	err = controlPlane.Start()
 	Expect(err).NotTo(HaveOccurred())
 })
 
 var _ = AfterSuite(func() {
-	fixtures.Stop()
+	controlPlane.Stop()
 	gexec.CleanupBuildArtifacts()
 })

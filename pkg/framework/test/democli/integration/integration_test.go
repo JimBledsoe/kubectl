@@ -9,7 +9,7 @@ import (
 	"github.com/onsi/gomega/gexec"
 )
 
-var _ = Describe("Integration", func() {
+var _ = Describe("DemoCLI Integration", func() {
 	It("can give us a helpful help message", func() {
 		helpfulMessage := `This is a demo kubernetes CLI, which interacts with the kubernetes API.`
 
@@ -21,7 +21,10 @@ var _ = Describe("Integration", func() {
 	})
 
 	It("can get a list of pods", func() {
-		command := exec.Command(pathToDemoCommand, "listPods")
+		apiURL, err := controlPlane.APIServerURL()
+		Expect(err).NotTo(HaveOccurred())
+
+		command := exec.Command(pathToDemoCommand, "listPods", "--api-url", apiURL)
 		session, err := gexec.Start(command, GinkgoWriter, GinkgoWriter)
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(session).Should(gexec.Exit(0))

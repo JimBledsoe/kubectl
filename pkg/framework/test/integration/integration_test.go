@@ -1,53 +1,74 @@
 package integration_test
 
 import (
-	"fmt"
 	"net"
 	"time"
+
+	"fmt"
+	"net/url"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"k8s.io/kubectl/pkg/framework/test"
 )
 
-var _ = Describe("Integration", func() {
-	It("Successfully manages the fixtures lifecycle", func() {
-		fixtures := test.NewFixtures(defaultPathToEtcd, defaultPathToApiserver)
+var _ = Describe("The Testing Framework", func() {
+	It("Successfully manages the control plane lifecycle", func() {
+		var err error
 
-		err := fixtures.Start()
-		Expect(err).NotTo(HaveOccurred(), "Expected fixtures to start successfully")
+		controlPlane := test.NewControlPlane()
 
-		isEtcdListening := isSomethingListeningOnPort(2379)
-		isAPIServerListening := isSomethingListeningOnPort(8080)
+		By("Starting all the control plane processes")
+		err = controlPlane.Start()
+		Expect(err).NotTo(HaveOccurred(), "Expected controlPlane to start successfully")
 
-		Expect(isEtcdListening()).To(BeTrue(), "Expected Etcd to listen on 2379")
+		var apiServerURL, etcdClientURL *url.URL
+		etcdUrlString, err := controlPlane.APIServer.(*test.APIServer).Etcd.URL()
+		Expect(err).NotTo(HaveOccurred())
+		etcdClientURL, err = url.Parse(etcdUrlString)
+		Expect(err).NotTo(HaveOccurred())
+		urlString, err := controlPlane.APIServerURL()
+		Expect(err).NotTo(HaveOccurred())
+		apiServerURL, err = url.Parse(urlString)
+		Expect(err).NotTo(HaveOccurred())
 
-		Expect(isAPIServerListening()).To(BeTrue(), "Expected APIServer to listen on 8080")
+		isEtcdListeningForClients := isSomethingListeningOnPort(etcdClientURL.Host)
+		isAPIServerListening := isSomethingListeningOnPort(apiServerURL.Host)
 
-		err = fixtures.Stop()
-		Expect(err).NotTo(HaveOccurred(), "Expected fixtures to stop successfully")
+		By("Ensuring Etcd is listening")
+		Expect(isEtcdListeningForClients()).To(BeTrue(),
+			fmt.Sprintf("Expected Etcd to listen for clients on %s,", etcdClientURL.Host))
 
-		Expect(isEtcdListening()).To(BeFalse(), "Expected Etcd not to listen anymore")
+		By("Ensuring APIServer is listening")
+		Expect(isAPIServerListening()).To(BeTrue(),
+			fmt.Sprintf("Expected APIServer to listen on %s", apiServerURL.Host))
+
+		By("Stopping all the control plane processes")
+		err = controlPlane.Stop()
+		Expect(err).NotTo(HaveOccurred(), "Expected controlPlane to stop successfully")
+
+		By("Ensuring Etcd is not listening anymore")
+		Expect(isEtcdListeningForClients()).To(BeFalse(), "Expected Etcd not to listen for clients anymore")
 
 		By("Ensuring APIServer is not listening anymore")
 		Expect(isAPIServerListening()).To(BeFalse(), "Expected APIServer not to listen anymore")
 	})
 
-	Measure("It should be fast to bring up and tear down the fixtures", func(b Benchmarker) {
+	Measure("It should be fast to bring up and tear down the control plane", func(b Benchmarker) {
 		b.Time("lifecycle", func() {
-			fixtures := test.NewFixtures(defaultPathToEtcd, defaultPathToApiserver)
+			controlPlane := test.NewControlPlane()
 
-			fixtures.Start()
-			fixtures.Stop()
+			controlPlane.Start()
+			controlPlane.Stop()
 		})
 	}, 10)
 })
 
 type portChecker func() bool
 
-func isSomethingListeningOnPort(port int) portChecker {
+func isSomethingListeningOnPort(hostAndPort string) portChecker {
 	return func() bool {
-		conn, err := net.DialTimeout("tcp", net.JoinHostPort("", fmt.Sprintf("%d", port)), 1*time.Second)
+		conn, err := net.DialTimeout("tcp", hostAndPort, 1*time.Second)
 
 		if err != nil {
 			return false

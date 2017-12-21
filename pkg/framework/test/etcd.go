@@ -2,56 +2,98 @@ package test
 
 import (
 	"fmt"
+	"io"
 	"os/exec"
 	"time"
 
-	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/gbytes"
 	"github.com/onsi/gomega/gexec"
 )
 
-// Etcd knows how to run an etcd server. Set it up with the path to a precompiled binary.
+// Etcd knows how to run an etcd server.
+//
+// The documentation and examples for the Etcd's properties can be found in
+// in the documentation for the `APIServer`, as both implement a `ControlPaneProcess`.
 type Etcd struct {
-	// The path to the etcd binary
+	AddressManager AddressManager
 	Path           string
-	EtcdURL        string
-	session        *gexec.Session
+	ProcessStarter SimpleSessionStarter
+	DataDirManager DataDirManager
+	StopTimeout    time.Duration
+	StartTimeout   time.Duration
+	session        SimpleSession
 	stdOut         *gbytes.Buffer
 	stdErr         *gbytes.Buffer
-	dataDirManager dataDirManager
 }
 
-type dataDirManager interface {
+// DataDirManager knows how to manage a data directory to be used by Etcd.
+type DataDirManager interface {
 	Create() (string, error)
 	Destroy() error
 }
 
+//go:generate counterfeiter . DataDirManager
+
+// SimpleSession describes a CLI session. You can get output, the exit code, and you can terminate it.
+//
+// It is implemented by *gexec.Session.
+type SimpleSession interface {
+	Buffer() *gbytes.Buffer
+	ExitCode() int
+	Terminate() *gexec.Session
+}
+
+//go:generate counterfeiter . SimpleSession
+
+// SimpleSessionStarter knows how to start a exec.Cmd with a writer for both StdOut & StdErr and returning it wrapped
+// in a `SimpleSession`.
+type SimpleSessionStarter func(command *exec.Cmd, out, err io.Writer) (SimpleSession, error)
+
+// URL returns the URL Etcd is listening on. Clients can use this to connect to Etcd.
+func (e *Etcd) URL() (string, error) {
+	if e.AddressManager == nil {
+		return "", fmt.Errorf("Etcd's AddressManager is not initialized")
+	}
+	port, err := e.AddressManager.Port()
+	if err != nil {
+		return "", err
+	}
+	host, err := e.AddressManager.Host()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("http://%s:%d", host, port), nil
+}
+
 // Start starts the etcd, waits for it to come up, and returns an error, if occoured.
 func (e *Etcd) Start() error {
-	e.dataDirManager = NewTempDirManager()
-	e.stdOut = gbytes.NewBuffer()
-	e.stdErr = gbytes.NewBuffer()
+	e.ensureInitialized()
 
-	dataDir, err := e.dataDirManager.Create()
+	port, host, err := e.AddressManager.Initialize()
 	if err != nil {
 		return err
 	}
 
-	args := []string{
-		"--debug",
-		"--advertise-client-urls",
-		e.EtcdURL,
-		"--listen-client-urls",
-		e.EtcdURL,
-		"--data-dir",
-		dataDir,
+	dataDir, err := e.DataDirManager.Create()
+	if err != nil {
+		return err
 	}
 
-	detectedStart := e.stdErr.Detect("serving insecure client requests on 127.0.0.1:2379")
-	timedOut := time.After(20 * time.Second)
+	clientURL := fmt.Sprintf("http://%s:%d", host, port)
+	args := []string{
+		"--debug",
+		"--listen-peer-urls=http://localhost:0",
+		fmt.Sprintf("--advertise-client-urls=%s", clientURL),
+		fmt.Sprintf("--listen-client-urls=%s", clientURL),
+		fmt.Sprintf("--data-dir=%s", dataDir),
+	}
+
+	detectedStart := e.stdErr.Detect(fmt.Sprintf(
+		"serving insecure client requests on %s", host))
+	timedOut := time.After(e.StartTimeout)
 
 	command := exec.Command(e.Path, args...)
-	e.session, err = gexec.Start(command, e.stdOut, e.stdErr)
+	e.session, err = e.ProcessStarter(command, e.stdOut, e.stdErr)
 	if err != nil {
 		return err
 	}
@@ -64,13 +106,51 @@ func (e *Etcd) Start() error {
 	}
 }
 
-// Stop stops this process gracefully, waits for its termination, and cleans up the data directory.
-func (e *Etcd) Stop() {
-	if e.session != nil {
-		e.session.Terminate().Wait(20 * time.Second)
-		err := e.dataDirManager.Destroy()
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+func (e *Etcd) ensureInitialized() {
+	if e.Path == "" {
+		e.Path = DefaultBinPathFinder("etcd")
 	}
+
+	if e.AddressManager == nil {
+		e.AddressManager = &DefaultAddressManager{}
+	}
+	if e.ProcessStarter == nil {
+		e.ProcessStarter = func(command *exec.Cmd, out, err io.Writer) (SimpleSession, error) {
+			return gexec.Start(command, out, err)
+		}
+	}
+	if e.DataDirManager == nil {
+		e.DataDirManager = NewTempDirManager()
+	}
+	if e.StopTimeout == 0 {
+		e.StopTimeout = 20 * time.Second
+	}
+	if e.StartTimeout == 0 {
+		e.StartTimeout = 20 * time.Second
+	}
+
+	e.stdOut = gbytes.NewBuffer()
+	e.stdErr = gbytes.NewBuffer()
+}
+
+// Stop stops this process gracefully, waits for its termination, and cleans up the data directory.
+func (e *Etcd) Stop() error {
+	if e.session == nil {
+		return nil
+	}
+
+	session := e.session.Terminate()
+	detectedStop := session.Exited
+	timedOut := time.After(e.StopTimeout)
+
+	select {
+	case <-detectedStop:
+		break
+	case <-timedOut:
+		return fmt.Errorf("timeout waiting for etcd to stop")
+	}
+
+	return e.DataDirManager.Destroy()
 }
 
 // ExitCode returns the exit code of the process, if it has exited. If it hasn't exited yet, ExitCode returns -1.
